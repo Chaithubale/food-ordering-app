@@ -1,0 +1,281 @@
+// === Root: food-ordering-mern ===
+// Directory Structure:
+// - client/ (React + Tailwind frontend)
+// - server/ (Node.js + Express + MongoDB backend)
+
+// === STEP 1: server/index.js ===
+const express = require("express");
+const mongoose = require("mongoose");
+const cors = require("cors");
+const twilio = require("twilio");
+const nodemailer = require("nodemailer");
+require("dotenv").config();
+
+const app = express();
+app.use(cors());
+app.use(express.json());
+
+mongoose
+  .connect(process.env.MONGO_URI)
+  .then(() => console.log("MongoDB Connected"))
+  .catch((err) => console.log(err));
+
+const Order = require("./models/Order");
+
+const twilioClient = twilio(
+  process.env.TWILIO_ACCOUNT_SID,
+  process.env.TWILIO_AUTH_TOKEN
+);
+
+const transporter = nodemailer.createTransport({
+  service: "gmail",
+  auth: {
+    user: process.env.MAIL_USER,
+    pass: process.env.MAIL_PASS,
+  },
+});
+
+app.post("/api/orders", async (req, res) => {
+  try {
+    const order = new Order(req.body);
+    await order.save();
+
+    const msgBody = `\nNew Order from ${req.body.customerName}\nPhone: ${req.body.phone}\nAddress: ${req.body.address}\nItems: ${req.body.items
+      .map((i) => `${i.name} x${i.quantity}`)
+      .join(", ")}\nTotal: ₹${req.body.total}`;
+
+    await twilioClient.messages.create({
+      from: "whatsapp:" + process.env.TWILIO_WHATSAPP_NUMBER,
+      to: process.env.ADMIN_PHONE,
+      body: msgBody,
+    });
+
+    await transporter.sendMail({
+      from: `\"Food Order Bot\" <${process.env.MAIL_USER}>`,
+      to: process.env.ADMIN_EMAIL,
+      subject: "New Food Order Received",
+      text: msgBody,
+    });
+
+    res.status(201).json({ message: "Order placed successfully" });
+  } catch (err) {
+    console.error(err);
+    res.status(500).json({ message: "Failed to place order" });
+  }
+});
+
+app.get("/api/orders", async (req, res) => {
+  const orders = await Order.find();
+  res.json(orders);
+});
+
+const PORT = process.env.PORT || 5000;
+app.listen(PORT, () => console.log(`Server running on port ${PORT}`));
+
+// === server/models/Order.js ===
+const mongoose = require("mongoose");
+
+const orderSchema = new mongoose.Schema({
+  customerName: String,
+  phone: String,
+  address: String,
+  items: [
+    {
+      name: String,
+      price: Number,
+      quantity: Number,
+    },
+  ],
+  total: Number,
+  createdAt: {
+    type: Date,
+    default: Date.now,
+  },
+});
+
+module.exports = mongoose.model("Order", orderSchema);
+
+// === STEP 2: client/src/App.jsx ===
+import React, { useState, useEffect } from "react";
+import axios from "axios";
+import "./App.css";
+
+const menuItems = [
+  { name: "Pizza", price: 150 },
+  { name: "Burger", price: 80 },
+  { name: "Fries", price: 60 },
+];
+
+export default function App() {
+  const [cart, setCart] = useState([]);
+  const [checkout, setCheckout] = useState(false);
+  const [customer, setCustomer] = useState({ name: "", phone: "", address: "" });
+  const [orders, setOrders] = useState([]);
+  const [isAdmin, setIsAdmin] = useState(false);
+
+  const addToCart = (item) => {
+    const exists = cart.find((i) => i.name === item.name);
+    if (exists) {
+      setCart(
+        cart.map((i) =>
+          i.name === item.name ? { ...i, quantity: i.quantity + 1 } : i
+        )
+      );
+    } else {
+      setCart([...cart, { ...item, quantity: 1 }]);
+    }
+  };
+
+  const getTotal = () => cart.reduce((sum, item) => sum + item.price * item.quantity, 0);
+
+  const placeOrder = async () => {
+    await axios.post("http://localhost:5000/api/orders", {
+      customerName: customer.name,
+      phone: customer.phone,
+      address: customer.address,
+      items: cart,
+      total: getTotal(),
+    });
+    alert("Order Placed Successfully!");
+    setCart([]);
+    setCheckout(false);
+  };
+
+  const fetchOrders = async () => {
+    const res = await axios.get("http://localhost:5000/api/orders");
+    setOrders(res.data);
+  };
+
+  useEffect(() => {
+    if (isAdmin) fetchOrders();
+  }, [isAdmin]);
+
+  if (isAdmin) {
+    return (
+      <div className="p-4 max-w-3xl mx-auto">
+        <h1 className="text-2xl font-bold mb-4">Admin Order Dashboard</h1>
+        {orders.map((order, idx) => (
+          <div key={idx} className="border rounded p-4 mb-4">
+            <p><strong>Name:</strong> {order.customerName}</p>
+            <p><strong>Phone:</strong> {order.phone}</p>
+            <p><strong>Address:</strong> {order.address}</p>
+            <p><strong>Items:</strong> {order.items.map(i => `${i.name} x${i.quantity}`).join(", ")}</p>
+            <p><strong>Total:</strong> ₹{order.total}</p>
+          </div>
+        ))}
+        <button
+          onClick={() => setIsAdmin(false)}
+          className="bg-red-500 text-white px-3 py-1 rounded"
+        >
+          Exit Admin Mode
+        </button>
+      </div>
+    );
+  }
+
+  return (
+    <div className="p-4 max-w-2xl mx-auto">
+      <h1 className="text-3xl font-bold mb-4">Food Menu</h1>
+      <button
+        className="bg-gray-800 text-white px-3 py-1 rounded mb-4"
+        onClick={() => setIsAdmin(true)}
+      >
+        Admin Mode
+      </button>
+
+      {!checkout ? (
+        <>
+          <ul className="space-y-4">
+            {menuItems.map((item) => (
+              <li key={item.name} className="flex justify-between border p-2 rounded">
+                <span>{item.name} - ₹{item.price}</span>
+                <button
+                  className="bg-blue-500 text-white px-2 py-1 rounded"
+                  onClick={() => addToCart(item)}
+                >
+                  Add to Cart
+                </button>
+              </li>
+            ))}
+          </ul>
+
+          <h2 className="text-xl mt-6 font-semibold">Cart</h2>
+          <ul className="mb-4">
+            {cart.map((item) => (
+              <li key={item.name}>
+                {item.name} x {item.quantity} = ₹{item.price * item.quantity}
+              </li>
+            ))}
+          </ul>
+
+          <button
+            className="bg-green-600 text-white px-4 py-2 rounded"
+            onClick={() => setCheckout(true)}
+            disabled={cart.length === 0}
+          >
+            Proceed to Checkout
+          </button>
+        </>
+      ) : (
+        <div>
+          <h2 className="text-xl font-bold mb-2">Checkout</h2>
+          <input
+            className="border p-2 mb-2 w-full"
+            type="text"
+            placeholder="Your Name"
+            value={customer.name}
+            onChange={(e) => setCustomer({ ...customer, name: e.target.value })}
+          />
+          <input
+            className="border p-2 mb-2 w-full"
+            type="text"
+            placeholder="Phone Number"
+            value={customer.phone}
+            onChange={(e) => setCustomer({ ...customer, phone: e.target.value })}
+          />
+          <input
+            className="border p-2 mb-2 w-full"
+            type="text"
+            placeholder="Delivery Address"
+            value={customer.address}
+            onChange={(e) => setCustomer({ ...customer, address: e.target.value })}
+          />
+          <button
+            className="bg-purple-700 text-white px-4 py-2 rounded"
+            onClick={placeOrder}
+          >
+            Confirm Order
+          </button>
+        </div>
+      )}
+    </div>
+  );
+}
+
+// === STEP 3: client/tailwind.config.js ===
+module.exports = {
+  content: ["./src/**/*.{js,jsx,ts,tsx}"],
+  theme: {
+    extend: {},
+  },
+  plugins: [],
+};
+
+// === STEP 4: client/index.css ===
+@tailwind base;
+@tailwind components;
+@tailwind utilities;
+
+// === STEP 5: .env (in server folder) ===
+MONGO_URI=your_mongo_uri
+
+# Twilio
+TWILIO_ACCOUNT_SID=your_twilio_sid
+TWILIO_AUTH_TOKEN=your_twilio_auth_token
+TWILIO_WHATSAPP_NUMBER=whatsapp:+14155238886
+ADMIN_PHONE=whatsapp:+91your_number
+
+# Email
+MAIL_USER=your_email@gmail.com
+MAIL_PASS=your_email_app_password
+ADMIN_EMAIL=your_email@gmail.com
